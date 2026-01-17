@@ -70,31 +70,33 @@ jobs:
               if (!statusName) return;
 
               try {
-                const { data: fields } = await github.rest.projectsV2.listFieldsForProject({
-                  owner: PROJECT_OWNER,
+                const fieldsResponse = await github.request('GET /users/{username}/projectsV2/{project_number}/fields', {
+                  username: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
                 });
 
-                const statusField = fields.find(f => f.name === 'Status' && f.data_type === 'single_select');
+                const statusField = fieldsResponse.data.find(
+                  f => f.name === 'Status' && f.data_type === 'single_select'
+                );
                 if (!statusField) return;
 
-                const { data: items } = await github.rest.projectsV2.listItems({
-                  owner: PROJECT_OWNER,
+                const statusOption = (statusField.options || []).find(opt => opt.name === statusName);
+                if (!statusOption) return;
+
+                const itemsResponse = await github.request('GET /users/{username}/projectsV2/{project_number}/items', {
+                  username: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
                 });
 
-                const item = items.find(i => {
+                const item = itemsResponse.data.find(i => {
                   const url = i.content?.url || '';
                   return url.includes(`/pulls/${prNumber}`) || url.includes(`/issues/${prNumber}`);
                 });
 
                 if (!item) return;
 
-                const statusOption = (statusField.options || []).find(opt => opt.name === statusName);
-                if (!statusOption) return;
-
-                await github.rest.projectsV2.updateItem({
-                  owner: PROJECT_OWNER,
+                await github.request('PATCH /users/{username}/projectsV2/{project_number}/items/{item_id}', {
+                  username: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
                   item_id: item.id,
                   body: {
