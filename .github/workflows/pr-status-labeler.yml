@@ -15,6 +15,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      repository-projects: write
     steps:
       - name: Update status label based on PR state
         uses: actions/github-script@v8
