@@ -54,12 +54,12 @@ jobs:
             const labelsToRemove = existingLabels.intersection(new Set(Object.keys(sizeLabels)));
             labelsToRemove.delete(sizeLabel);
 
-            if (labelsToRemove.size > 0) {
-              await github.rest.issues.removeLabels({
+            for (const label of labelsToRemove) {
+              await github.rest.issues.removeLabel({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                labels: Array.from(labelsToRemove),
+                name: label,
               });
             }
 
