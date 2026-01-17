@@ -2,13 +2,11 @@ name: PR Status Labeler
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
   pull_request_review:
     types: [submitted, dismissed]
   issue_comment:
     types: [created, edited]
-  label:
-    types: [created]
 
 jobs:
   label:
@@ -114,7 +112,7 @@ jobs:
             }
 
             // Handle manual label addition
-            if (context.eventName === 'label') {
+            if (context.eventName === 'pull_request' && context.payload.action === 'labeled') {
               const addedLabel = context.payload.label?.name;
               if (statusLabels.has(addedLabel)) {
                 // Remove all other status labels except the one just added
@@ -136,7 +134,7 @@ jobs:
             }
 
             // If needs-decision is set, don't automatically update (unless manually removed)
-            if (hasNeedsDecision && context.eventName !== 'label') {
+            if (hasNeedsDecision && !(context.eventName === 'pull_request' && context.payload.action === 'labeled')) {
               console.log('status:needs-decision is set, skipping automatic label update');
               return;
             }
