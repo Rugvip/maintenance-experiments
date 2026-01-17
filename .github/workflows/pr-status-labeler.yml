@@ -17,12 +17,28 @@ jobs:
       issues: write
       repository-projects: write
     steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Update status label based on PR state
         uses: actions/github-script@v8
+        env:
+          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
           script: |
             const PROJECT_OWNER = 'Rugvip';
             const PROJECT_NUMBER = 4;
+            const PROJECT_TOKEN = process.env.PROJECT_TOKEN;
+
+            if (!PROJECT_TOKEN) {
+              throw new Error('PROJECT_TOKEN is not set. Check that APP_ID and APP_PRIVATE_KEY secrets are configured.');
+            }
+
+            console.log(`[Auth] Using GitHub App installation token`);
 
             const labelStatusMap = new Map([
               ['status:needs-changes', 'Needs Changes'],
@@ -97,10 +113,20 @@ jobs:
 
               try {
                 console.log(`[syncLabelToProject] Fetching project fields for ${PROJECT_OWNER}/project ${PROJECT_NUMBER}`);
-                const fieldsResponse = await github.request('GET /users/{username}/projectsV2/{project_number}/fields', {
+
+                const requestOptions = {
                   username: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
-                });
+                };
+
+                if (PROJECT_TOKEN && PROJECT_TOKEN !== process.env.GITHUB_TOKEN) {
+                  requestOptions.headers = {
+                    authorization: `token ${PROJECT_TOKEN}`,
+                  };
+                  console.log(`[syncLabelToProject] Using custom token for authentication`);
+                }
+
+                const fieldsResponse = await github.request('GET /users/{username}/projectsV2/{project_number}/fields', requestOptions);
 
                 console.log(`[syncLabelToProject] Found ${fieldsResponse.data.length} fields`);
                 const statusField = fieldsResponse.data.find(
@@ -123,10 +149,15 @@ jobs:
                 console.log(`[syncLabelToProject] Found status option "${statusName}" with ID: ${statusOption.id}`);
 
                 console.log(`[syncLabelToProject] Fetching project items for PR #${prNumber}`);
-                const itemsResponse = await github.request('GET /users/{username}/projectsV2/{project_number}/items', {
+                const itemsRequestOptions = {
                   username: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
-                });
+                  headers: {
+                    authorization: `token ${PROJECT_TOKEN}`,
+                  },
+                };
+
+                const itemsResponse = await github.request('GET /users/{username}/projectsV2/{project_number}/items', itemsRequestOptions);
 
                 console.log(`[syncLabelToProject] Found ${itemsResponse.data.length} items in project`);
                 const item = itemsResponse.data.find(i => {
@@ -142,10 +173,13 @@ jobs:
                 console.log(`[syncLabelToProject] Found project item for PR #${prNumber} with ID: ${item.id}`);
 
                 console.log(`[syncLabelToProject] Updating project item with status "${statusName}"`);
-                await github.request('PATCH /users/{username}/projectsV2/{project_number}/items/{item_id}', {
+                const updateRequestOptions = {
                   username: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
                   item_id: item.id,
+                  headers: {
+                    authorization: `token ${PROJECT_TOKEN}`,
+                  },
                   body: {
                     fields: {
                       [statusField.id]: {
@@ -153,12 +187,25 @@ jobs:
                       },
                     },
                   },
-                });
+                };
+
+                await github.request('PATCH /users/{username}/projectsV2/{project_number}/items/{item_id}', updateRequestOptions);
 
                 console.log(`[syncLabelToProject] Successfully synced label "${labelName}" to project status "${statusName}"`);
               } catch (error) {
-                console.log(`[syncLabelToProject] Error syncing to project:`, error.message);
-                console.log(`[syncLabelToProject] Error details:`, error);
+                if (error.status === 403) {
+                  console.log(`[syncLabelToProject] Access denied (403). Check that:`);
+                  console.log(`[syncLabelToProject] 1. APP_ID and APP_PRIVATE_KEY secrets are set`);
+                  console.log(`[syncLabelToProject] 2. The GitHub App has project permissions`);
+                  console.log(`[syncLabelToProject] 3. The GitHub App is installed on this repository`);
+                  console.log(`[syncLabelToProject] Skipping project sync.`);
+                } else {
+                  console.log(`[syncLabelToProject] Error syncing to project:`, error.message);
+                  console.log(`[syncLabelToProject] Error status: ${error.status}`);
+                  if (error.response?.data) {
+                    console.log(`[syncLabelToProject] Error response:`, JSON.stringify(error.response.data, null, 2));
+                  }
+                }
               }
             }
 
