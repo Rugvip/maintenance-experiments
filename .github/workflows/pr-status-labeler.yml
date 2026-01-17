@@ -2,7 +2,7 @@ name: PR Status Labeler
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   pull_request_review:
     types: [submitted, dismissed]
   issue_comment:
@@ -20,27 +20,9 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            // Get PR number - handle different event types
-            let prNumber = null;
-            if (context.payload.pull_request) {
-              prNumber = context.payload.pull_request.number;
-            } else if (context.payload.issue) {
-              // For label events and issue_comment events, check if it's a PR
-              if (context.payload.issue.pull_request) {
-                prNumber = context.payload.issue.number;
-              } else {
-                // It's an issue, not a PR, skip
-                return;
-              }
-            } else {
-              return;
-            }
-
-            // Project status sync configuration
             const PROJECT_OWNER = 'Rugvip';
             const PROJECT_NUMBER = 4;
 
-            // Map label names to project status names
             const labelStatusMap = new Map([
               ['status:needs-changes', 'Needs Changes'],
               ['status:needs-review', 'Needs Review'],
@@ -49,78 +31,72 @@ jobs:
               ['status:awaiting-merge', 'Awaiting Merge'],
             ]);
 
-            // Define mutually exclusive status labels
             const statusLabels = new Set(labelStatusMap.keys());
 
-            // Helper function for Set intersection
-            const intersection = (set1, set2) => new Set([...set1].filter(x => set2.has(x)));
-            // Helper function for Set difference
-            const difference = (set1, set2) => new Set([...set1].filter(x => !set2.has(x)));
+            function getPrNumber() {
+              if (context.payload.pull_request) {
+                return context.payload.pull_request.number;
+              }
+              if (context.payload.issue?.pull_request) {
+                return context.payload.issue.number;
+              }
+              return null;
+            }
 
-            // Helper function to sync label to project status
-            const syncLabelToProject = async (labelName) => {
+            async function removeLabels(labels) {
+              for (const label of labels) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: label,
+                });
+              }
+            }
+
+            async function addLabel(label) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [label],
+              });
+            }
+
+            async function syncLabelToProject(labelName) {
+              if (!labelName) return;
+
+              const statusName = labelStatusMap.get(labelName);
+              if (!statusName) return;
+
               try {
-                const statusName = labelStatusMap.get(labelName);
-                if (!statusName) {
-                  console.log(`Label "${labelName}" is not mapped to a project status, skipping sync`);
-                  return;
-                }
-
-                // Query project fields to get status field and options
                 const { data: fields } = await github.rest.projectsV2.listFieldsForProject({
                   owner: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
                 });
 
-                const statusField = fields.find(field =>
-                  field.name === 'Status' && field.data_type === 'single_select'
-                );
+                const statusField = fields.find(f => f.name === 'Status' && f.data_type === 'single_select');
+                if (!statusField) return;
 
-                if (!statusField) {
-                  console.log('Status field not found in project, skipping sync');
-                  return;
-                }
+                const { data: items } = await github.rest.projectsV2.listItems({
+                  owner: PROJECT_OWNER,
+                  project_number: PROJECT_NUMBER,
+                });
 
-                // Find the status option ID by matching the status name
-                const statusOptions = statusField.options || [];
-                const statusOption = statusOptions.find(opt => opt.name === statusName);
+                const item = items.find(i => {
+                  const url = i.content?.url || '';
+                  return url.includes(`/pulls/${prNumber}`) || url.includes(`/issues/${prNumber}`);
+                });
 
-                if (!statusOption) {
-                  console.log(`Status option "${statusName}" not found in project, skipping sync`);
-                  return;
-                }
+                if (!item) return;
 
-                // Find the project item for this PR
-                let itemId = null;
-                try {
-                  const { data: items } = await github.rest.projectsV2.listItems({
-                    owner: PROJECT_OWNER,
-                    project_number: PROJECT_NUMBER,
-                  });
+                const statusOption = (statusField.options || []).find(opt => opt.name === statusName);
+                if (!statusOption) return;
 
-                  const item = items.find(i => {
-                    const contentUrl = i.content?.url || '';
-                    return contentUrl.includes(`/pulls/${prNumber}`) || contentUrl.includes(`/issues/${prNumber}`);
-                  });
-
-                  if (item) {
-                    itemId = item.id;
-                  }
-                } catch (error) {
-                  console.log(`Error querying project items:`, error.message);
-                  return;
-                }
-
-                if (!itemId) {
-                  console.log(`PR #${prNumber} not found in project, skipping sync`);
-                  return;
-                }
-
-                // Update project status field
                 await github.rest.projectsV2.updateItem({
                   owner: PROJECT_OWNER,
                   project_number: PROJECT_NUMBER,
-                  item_id: itemId,
+                  item_id: item.id,
                   body: {
                     fields: {
                       [statusField.id]: {
@@ -129,232 +105,143 @@ jobs:
                     },
                   },
                 });
-                console.log(`Synced label "${labelName}" to project status "${statusName}"`);
               } catch (error) {
                 console.log(`Error syncing to project:`, error.message);
               }
-            };
+            }
 
-            // Get current PR and labels first to check for needs-decision
+            async function determineTargetLabel() {
+              if (context.eventName === 'pull_request' && context.payload.action === 'labeled') {
+                const addedLabel = context.payload.label?.name;
+                if (statusLabels.has(addedLabel)) {
+                  return addedLabel;
+                }
+              }
+
+              if (context.eventName === 'pull_request' && context.payload.action === 'unlabeled') {
+                const removedLabel = context.payload.label?.name;
+                if (statusLabels.has(removedLabel)) {
+                  return 'status:needs-review';
+                }
+              }
+
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+
+              const existingLabels = new Set(pr.labels.map(l => l.name));
+              const hasNeedsDecision = existingLabels.has('status:needs-decision');
+              const hasNeedsChanges = existingLabels.has('status:needs-changes');
+              const prAuthor = pr.user.login;
+
+              if (hasNeedsDecision && !(context.eventName === 'pull_request' && context.payload.action === 'labeled')) {
+                return null;
+              }
+
+              if (hasNeedsChanges) {
+                const isAuthorAction =
+                  (context.eventName === 'issue_comment' && context.payload.comment.user.login === prAuthor) ||
+                  (context.eventName === 'pull_request' && context.payload.action === 'synchronize' && context.payload.sender?.login === prAuthor);
+
+                if (isAuthorAction) {
+                  return 'status:needs-review';
+                }
+              }
+
+              async function getReviews() {
+                const { data: reviews } = await github.rest.pulls.listReviews({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                });
+                return reviews;
+              }
+
+              if (context.eventName === 'pull_request_review') {
+                const action = context.payload.action;
+                if (action === 'dismissed') {
+                  const reviews = await getReviews();
+                  const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
+                  const hasApprovals = reviews.some(r => r.state === 'APPROVED');
+                  if (hasChangesRequested) return 'status:needs-changes';
+                  if (hasApprovals) return 'status:awaiting-merge';
+                  return 'status:needs-review';
+                }
+
+                const review = context.payload.review;
+                if (review.state === 'changes_requested') {
+                  return 'status:needs-changes';
+                }
+                if (review.state === 'approved') {
+                  const reviews = await getReviews();
+                  const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
+                  return hasChangesRequested ? 'status:needs-changes' : 'status:awaiting-merge';
+                }
+              }
+
+              if (context.eventName === 'pull_request') {
+                const action = context.payload.action;
+                if (action === 'opened' || action === 'synchronize' || action === 'reopened') {
+                  const reviews = await getReviews();
+                  const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
+                  const hasApprovals = reviews.some(r => r.state === 'APPROVED');
+                  if (hasChangesRequested) return 'status:needs-changes';
+                  if (hasApprovals) return 'status:awaiting-merge';
+                  return 'status:needs-review';
+                }
+              }
+
+              if (context.eventName === 'issue_comment') {
+                const comment = context.payload.comment;
+                if (comment.user.type !== 'Bot') {
+                  const reviews = await getReviews();
+                  const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
+                  if (hasChangesRequested) return 'status:needs-changes';
+                }
+              }
+
+              return null;
+            }
+
+            const prNumber = getPrNumber();
+            if (!prNumber) return;
+
+            const targetLabel = await determineTargetLabel();
+
+            if (targetLabel === null) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const existingLabels = new Set(pr.labels.map(l => l.name));
+              const existingStatusLabels = existingLabels.intersection(statusLabels);
+              if (existingStatusLabels.size === 0) {
+                const defaultLabel = 'status:needs-review';
+                await removeLabels(existingStatusLabels);
+                await addLabel(defaultLabel);
+                await syncLabelToProject(defaultLabel);
+              }
+              return;
+            }
+
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: prNumber,
             });
 
-            const existingLabels = new Set(pr.labels.map(label => label.name));
-            const hasNeedsDecision = existingLabels.has('status:needs-decision');
-            const hasNeedsChanges = existingLabels.has('status:needs-changes');
-            const prAuthor = pr.user.login;
+            const existingLabels = new Set(pr.labels.map(l => l.name));
+            const existingStatusLabels = existingLabels.intersection(statusLabels);
+            const labelsToRemove = existingStatusLabels.difference(new Set([targetLabel]));
 
-            // If status is needs-changes and PR author comments or pushes, change to needs-review
-            if (hasNeedsChanges) {
-              let isAuthorAction = false;
+            await removeLabels(labelsToRemove);
 
-              if (context.eventName === 'issue_comment') {
-                const comment = context.payload.comment;
-                if (comment.user.login === prAuthor) {
-                  isAuthorAction = true;
-                }
-              } else if (context.eventName === 'pull_request' && context.payload.action === 'synchronize') {
-                // Check if the pusher is the PR author
-                const sender = context.payload.sender?.login;
-                if (sender === prAuthor) {
-                  isAuthorAction = true;
-                }
-              }
-
-              if (isAuthorAction) {
-                const existingStatusLabels = intersection(existingLabels, statusLabels);
-                const needsReviewLabel = 'status:needs-review';
-                const needsReviewSet = new Set([needsReviewLabel]);
-                const alreadyHasNeedsReview = existingLabels.has(needsReviewLabel);
-
-                // Remove existing status labels except needs-review
-                const labelsToRemove = difference(existingStatusLabels, needsReviewSet);
-
-                for (const label of labelsToRemove) {
-                  await github.rest.issues.removeLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: prNumber,
-                    name: label,
-                  });
-                }
-
-                // Add needs-review label only if not already present
-                if (!alreadyHasNeedsReview) {
-                  await github.rest.issues.addLabels({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: prNumber,
-                    labels: [needsReviewLabel],
-                  });
-                }
-                console.log(`Changed status from needs-changes to needs-review after PR author action`);
-                return;
-              }
-            }
-
-            // Handle manual label addition
-            if (context.eventName === 'pull_request' && context.payload.action === 'labeled') {
-              const addedLabel = context.payload.label?.name;
-              if (statusLabels.has(addedLabel)) {
-                // Remove all other status labels except the one just added
-                const existingStatusLabels = intersection(existingLabels, statusLabels);
-                const addedLabelSet = new Set([addedLabel]);
-                const labelsToRemove = difference(existingStatusLabels, addedLabelSet);
-
-                for (const label of labelsToRemove) {
-                  await github.rest.issues.removeLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: prNumber,
-                    name: label,
-                  });
-                }
-                console.log(`Cleaned up other status labels after manual addition of ${addedLabel}`);
-                return;
-              }
-            }
-
-            // If needs-decision is set, don't automatically update (unless manually removed)
-            if (hasNeedsDecision && !(context.eventName === 'pull_request' && context.payload.action === 'labeled')) {
-              console.log('status:needs-decision is set, skipping automatic label update');
-              return;
-            }
-
-            // Determine which label to apply based on the event
-            let newLabel = null;
-
-            // Handle PR review events
-            if (context.eventName === 'pull_request_review') {
-              const action = context.payload.action;
-
-              // If review is dismissed, re-evaluate based on remaining reviews
-              if (action === 'dismissed') {
-                const { data: reviews } = await github.rest.pulls.listReviews({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: prNumber,
-                });
-
-                const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
-                const hasApprovals = reviews.some(r => r.state === 'APPROVED');
-
-                if (hasChangesRequested) {
-                  newLabel = 'status:needs-changes';
-                } else if (hasApprovals) {
-                  newLabel = 'status:awaiting-merge';
-                } else {
-                  newLabel = 'status:needs-review';
-                }
-              } else {
-                const review = context.payload.review;
-                if (review.state === 'changes_requested') {
-                  newLabel = 'status:needs-changes';
-                } else if (review.state === 'approved') {
-                  // Check if there are other pending reviews or if it's ready
-                  const { data: reviews } = await github.rest.pulls.listReviews({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    pull_number: prNumber,
-                  });
-
-                  // Check if there are any "changes_requested" reviews
-                  const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
-                  if (!hasChangesRequested) {
-                    newLabel = 'status:awaiting-merge';
-                  } else {
-                    newLabel = 'status:needs-changes';
-                  }
-                }
-              }
-            }
-
-            // Handle PR opened/updated events
-            else if (context.eventName === 'pull_request') {
-              const action = context.payload.action;
-              if (action === 'opened' || action === 'synchronize' || action === 'reopened') {
-                // Check existing reviews to determine state
-                const { data: reviews } = await github.rest.pulls.listReviews({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: prNumber,
-                });
-
-                const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
-                const hasApprovals = reviews.some(r => r.state === 'APPROVED');
-
-                if (hasChangesRequested) {
-                  newLabel = 'status:needs-changes';
-                } else if (hasApprovals && !hasChangesRequested) {
-                  newLabel = 'status:awaiting-merge';
-                } else {
-                  newLabel = 'status:needs-review';
-                }
-              }
-            }
-
-            // Handle comments
-            else if (context.eventName === 'issue_comment') {
-              const comment = context.payload.comment;
-              // Only process if comment is not from a bot and is on a PR
-              if (!comment.user.type || comment.user.type !== 'Bot') {
-                // Check if PR has changes requested - if so, comment might be about fixes
-                const { data: reviews } = await github.rest.pulls.listReviews({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: prNumber,
-                });
-
-                const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
-                if (hasChangesRequested) {
-                  newLabel = 'status:needs-changes';
-                }
-              }
-            }
-
-            // Get existing status labels once
-            const existingStatusLabels = intersection(existingLabels, statusLabels);
-
-            // If no label determined, default to needs-review (if no status label exists)
-            if (!newLabel) {
-              if (existingStatusLabels.size === 0) {
-                newLabel = 'status:needs-review';
-                console.log('No status label determined, defaulting to needs-review');
-              } else {
-                console.log('No status label determined for this event, keeping existing labels');
-                return;
-              }
-            }
-            const alreadyHasNewLabel = existingLabels.has(newLabel);
-
-            // Remove existing status labels except the one we're about to add
-            const newLabelSet = new Set([newLabel]);
-            const labelsToRemove = difference(existingStatusLabels, newLabelSet);
-
-            for (const label of labelsToRemove) {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                name: label,
-              });
-            }
-
-            // Add the new status label only if it's not already present
-            if (!alreadyHasNewLabel) {
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                labels: [newLabel],
-              });
-              console.log(`Applied label: ${newLabel}`);
-
-              // Sync to project
-              await syncLabelToProject(newLabel, 'labeled');
+            if (!existingLabels.has(targetLabel)) {
+              await addLabel(targetLabel);
+              await syncLabelToProject(targetLabel);
             } else {
-              console.log(`Label ${newLabel} already present, skipped adding`);
+              await syncLabelToProject(targetLabel);
             }
