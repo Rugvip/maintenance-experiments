@@ -20,12 +20,11 @@ jobs:
             ];
 
             const sizeLabels = {
-              'size:xs': 10,
-              'size:s': 50,
-              'size:m': 100,
-              'size:l': 500,
-              'size:xl': 1000,
-              'size:xxl': Infinity,
+              'size:tiny': 5,
+              'size:small': 50,
+              'size:medium': 500,
+              'size:large': 2500,
+              'size:huge': Infinity,
             }
 
             const { data: allFiles } = await github.rest.pulls.listFiles({
