@@ -36,19 +36,104 @@ jobs:
               return;
             }
 
-            // Define mutually exclusive status labels
-            const statusLabels = new Set([
-              'status:needs-changes',
-              'status:needs-review',
-              'status:needs-owner-review',
-              'status:needs-decision',
-              'status:awaiting-merge',
+            // Project status sync configuration
+            const PROJECT_OWNER = 'Rugvip';
+            const PROJECT_NUMBER = 4;
+
+            // Map label names to project status names
+            const labelStatusMap = new Map([
+              ['status:needs-changes', 'Needs Changes'],
+              ['status:needs-review', 'Needs Review'],
+              ['status:needs-owner-review', 'Needs Owner Review'],
+              ['status:needs-decision', 'Needs Decision'],
+              ['status:awaiting-merge', 'Awaiting Merge'],
             ]);
+
+            // Define mutually exclusive status labels
+            const statusLabels = new Set(labelStatusMap.keys());
 
             // Helper function for Set intersection
             const intersection = (set1, set2) => new Set([...set1].filter(x => set2.has(x)));
             // Helper function for Set difference
             const difference = (set1, set2) => new Set([...set1].filter(x => !set2.has(x)));
+
+            // Helper function to sync label to project status
+            const syncLabelToProject = async (labelName) => {
+              try {
+                const statusName = labelStatusMap.get(labelName);
+                if (!statusName) {
+                  console.log(`Label "${labelName}" is not mapped to a project status, skipping sync`);
+                  return;
+                }
+
+                // Query project fields to get status field and options
+                const { data: fields } = await github.rest.projectsV2.listFieldsForProject({
+                  owner: PROJECT_OWNER,
+                  project_number: PROJECT_NUMBER,
+                });
+
+                const statusField = fields.find(field =>
+                  field.name === 'Status' && field.data_type === 'single_select'
+                );
+
+                if (!statusField) {
+                  console.log('Status field not found in project, skipping sync');
+                  return;
+                }
+
+                // Find the status option ID by matching the status name
+                const statusOptions = statusField.options || [];
+                const statusOption = statusOptions.find(opt => opt.name === statusName);
+
+                if (!statusOption) {
+                  console.log(`Status option "${statusName}" not found in project, skipping sync`);
+                  return;
+                }
+
+                // Find the project item for this PR
+                let itemId = null;
+                try {
+                  const { data: items } = await github.rest.projectsV2.listItems({
+                    owner: PROJECT_OWNER,
+                    project_number: PROJECT_NUMBER,
+                  });
+
+                  const item = items.find(i => {
+                    const contentUrl = i.content?.url || '';
+                    return contentUrl.includes(`/pulls/${prNumber}`) || contentUrl.includes(`/issues/${prNumber}`);
+                  });
+
+                  if (item) {
+                    itemId = item.id;
+                  }
+                } catch (error) {
+                  console.log(`Error querying project items:`, error.message);
+                  return;
+                }
+
+                if (!itemId) {
+                  console.log(`PR #${prNumber} not found in project, skipping sync`);
+                  return;
+                }
+
+                // Update project status field
+                await github.rest.projectsV2.updateItem({
+                  owner: PROJECT_OWNER,
+                  project_number: PROJECT_NUMBER,
+                  item_id: itemId,
+                  body: {
+                    fields: {
+                      [statusField.id]: {
+                        single_select_option_id: statusOption.id,
+                      },
+                    },
+                  },
+                });
+                console.log(`Synced label "${labelName}" to project status "${statusName}"`);
+              } catch (error) {
+                console.log(`Error syncing to project:`, error.message);
+              }
+            };
 
             // Get current PR and labels first to check for needs-decision
             const { data: pr } = await github.rest.pulls.get({
@@ -267,6 +352,9 @@ jobs:
                 labels: [newLabel],
               });
               console.log(`Applied label: ${newLabel}`);
+
+              // Sync to project
+              await syncLabelToProject(newLabel, 'labeled');
             } else {
               console.log(`Label ${newLabel} already present, skipped adding`);
             }
