@@ -185,8 +185,6 @@ jobs:
                   } else {
                     newLabel = 'status:needs-changes';
                   }
-                } else if (review.state === 'commented' && !hasNeedsDecision) {
-                  newLabel = 'status:needs-decision';
                 }
               }
             }
@@ -215,7 +213,7 @@ jobs:
               }
             }
 
-            // Handle comments (could indicate discussion needed)
+            // Handle comments
             else if (context.eventName === 'issue_comment') {
               const comment = context.payload.comment;
               // Only process if comment is not from a bot and is on a PR
@@ -230,19 +228,23 @@ jobs:
                 const hasChangesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
                 if (hasChangesRequested) {
                   newLabel = 'status:needs-changes';
-                } else if (!hasNeedsDecision) {
-                  newLabel = 'status:needs-decision';
                 }
               }
             }
 
-            // If no label determined, skip
-            if (!newLabel) {
-              console.log('No status label determined for this event');
-              return;
-            }
-
+            // Get existing status labels once
             const existingStatusLabels = intersection(existingLabels, statusLabels);
+
+            // If no label determined, default to needs-review (if no status label exists)
+            if (!newLabel) {
+              if (existingStatusLabels.size === 0) {
+                newLabel = 'status:needs-review';
+                console.log('No status label determined, defaulting to needs-review');
+              } else {
+                console.log('No status label determined for this event, keeping existing labels');
+                return;
+              }
+            }
             const alreadyHasNewLabel = existingLabels.has(newLabel);
 
             // Remove existing status labels except the one we're about to add
