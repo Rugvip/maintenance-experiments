@@ -1,0 +1,76 @@
+name: PR Size Labeler
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Label PR based on size
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ignorePatterns = [
+              /^yarn\.lock$/,
+            ];
+
+            const sizeLabels = {
+              'size:xs': 10,
+              'size:s': 50,
+              'size:m': 100,
+              'size:l': 500,
+              'size:xl': 1000,
+              'size:xxl': Infinity,
+            }
+
+            const { data: allFiles } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+
+            const relevantFiles = allFiles.filter(file => {
+              return !ignorePatterns.some(pattern => pattern.test(file.filename));
+            });
+
+            // Only counting additions
+            const totalChanges = relevantFiles.reduce((sum, file) => sum + file.additions, 0);
+
+            const sizeLabel = Object.entries(sizeLabels).find(([_, threshold]) => totalChanges <= threshold)?.[0];
+
+            // Get current labels
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+
+            const existingLabels = new Set(pr.labels.map(label => label.name));
+            const labelsToRemove = existingLabels.intersection(new Set(Object.keys(sizeLabels)));
+            labelsToRemove.delete(sizeLabel);
+
+            if (labelsToRemove.size > 0) {
+              await github.rest.issues.removeLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: Array.from(labelsToRemove),
+              });
+            }
+
+            // Add new size label
+            if (!existingLabels.has(sizeLabel)) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: [sizeLabel],
+              });
+            }
+
+            console.log(`Labeled PR with "${sizeLabel}" (${totalChanges} changes, ${relevantFiles.length} files)`);
